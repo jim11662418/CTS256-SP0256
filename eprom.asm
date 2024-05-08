@@ -57,7 +57,7 @@ texthi      equ R123                         ; high byte of pointer to text to b
 textlo      equ R124                         ; high byte of pointer to text to be printed
 loopcounthi equ R125                         ; high byte of the loop counter for flashing LED
 loopcountlo equ R126                         ; low byte of the loop counter for flashing LED
-monitor     equ R127                         ; non-zero means run monitor (controlled by jumper connected to pin 3)
+monitor     equ R127                         ; non-zero means run monitor (controlled by jumper connected to pin 15)
 
 ; I/O ports...
 IOCNT0      equ P0                           ; I/O Control register 0
