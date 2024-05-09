@@ -97,7 +97,7 @@ EPROM:      ; this initialization code is necessary since the port A inputs that
             movp %15H,SCTL0                  ; reset error flags, enable receive, enable transmit
             movp %0C0H,SCTL1                 ; run Timer 3, specify internal SCLK from Timer 3
             movp %T3Reload,T3DATA            ; Timer 3 Reload Register value for baud rate
-            or	%01H,F2	                     ; configure for any delimiter (and %0FEH,F2 for CR only delimiter)
+            or %01H,F2	                     ; configure for any delimiter (and %0FEH,F2 for CR only delimiter)
             
             movp APORT,A                     ; read port A inputs
             and %02H,A                       ; mask everything except the jumper connected to pin 7
