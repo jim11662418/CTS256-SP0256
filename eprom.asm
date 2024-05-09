@@ -1,10 +1,11 @@
             PAGE 0          ; suppress page headings in ASW listing file
+            
 ; exception EPROM for General Instrument CTS256A-AL2 text-to-speech processor
 ;
 ; Syntax is for the Macro Assembler AS V1.42 http://john.ccac.rwth-aachen.de:8000/as/
 ;
-; after a reset, if the jumper connected to pin 3 is closed, the CTS256 looks for user input from the
-; serial port (9600 bps, 7 data bits, no parity, 2 stop bits) to implement a primitive sort of monitor.
+; after a reset, if the jumper connected to pin 7 is closed, the CTS256 looks for user input from the
+; serial port (38400 bps, 7 data bits, no parity, 2 stop bits) to implement a primitive sort of monitor.
 ;
 ; the following monitor commands are supported:
 ; C - Call subroutine
@@ -41,7 +42,7 @@ BUFBVALU    equ R50
 WORDCNTH    equ R56
 WORDCNTL    equ R57
 
-; registers used by "usercode"
+; registers used by "usercode"...
 suppress    equ R112                         ; suppress leading zeros flag for decimal print function
 count       equ R113                         ; used by decimal print function
 statusreg   equ R114                         ; saved copy of status register
@@ -57,7 +58,7 @@ texthi      equ R123                         ; high byte of pointer to text to b
 textlo      equ R124                         ; high byte of pointer to text to be printed
 loopcounthi equ R125                         ; high byte of the loop counter for flashing LED
 loopcountlo equ R126                         ; low byte of the loop counter for flashing LED
-monitor     equ R127                         ; non-zero means run monitor (controlled by jumper connected to pin 15)
+monitor     equ R127                         ; non-zero means run monitor (controlled by jumper connected to pin 7)
 
 ; I/O ports...
 IOCNT0      equ P0                           ; I/O Control register 0
@@ -66,11 +67,14 @@ BPORT       equ P6                           ; Port B
 IOCNT1      equ P16                          ; I/O Control register 1
 SMODE       equ P17                          ; 1st write - Serial port Mode
 SSTAT       equ P17                          ; read - Serial port Status
-SCTL0       equ P17                          ; write - Serial port Control 0
+SCTL0       equ P17                          ; 2nd and subsequent writes - Serial port Control 0
 T3DATA      equ P20                          ; Timer 3 Data
 SCTL1       equ P21                          ; Serial Control register 1
 RXBUF       equ P22                          ; Serial Receive Buffer
 TXBUF       equ P23                          ; Serial Transmit Buffer
+
+T3Reload    equ 00H                          ; Timer 3 Reload Register value for determining baud rate:
+                                             ; 00H=38400 bps, 01H=19200 bps, 03H=9600 bps, 07H=4800 bps, 0FH=2400 bps
 
             org 5000H                        ; exception EPROM starts here
 
@@ -86,11 +90,21 @@ TXBUF       equ P23                          ; Serial Transmit Buffer
             include exceptions.inc           ; exception words and exception word routine
 
 ;----------- this initiation code is run once upon reset -----------
-EPROM:      mov %0F0H,loopcounthi            ; pre-set the high byte of the loop counter (loop counter starts at 0F000H, counts to 10000)
-            movp APORT,A                     ; retrieve port A
-            and %40H,A                       ; mask all but bit 6 of port A (pin 15, input from monitor jumper)
-            xor %40H,A                       ; invert the bit (jumper present results in '1')
-            sta monitor
+EPROM:      ; this initialization code is necessary since the port A inputs that
+            ; were normally used to specify parameters are now being used for other purposes.
+            movp %40H,SCTL0                  ; reset the serial port
+            movp %0CBH,SMODE                 ; configure serial port for N-7-2
+            movp %15H,SCTL0                  ; reset error flags, enable receive, enable transmit
+            movp %0C0H,SCTL1                 ; run Timer 3, specify internal SCLK from Timer 3
+            movp %T3Reload,T3DATA            ; Timer 3 Reload Register value for baud rate
+            or	%01H,F2	                     ; configure for any delimiter (and %0FEH,F2 for CR only delimiter)
+            
+            movp APORT,A                     ; read port A inputs
+            and %02H,A                       ; mask everything except the jumper connected to pin 7
+            xor %02H,A                       ; invert the bit
+            sta monitor                      ; save it as the 'run monitor' flag ('1' means run monitor)
+            mov %0F0H,loopcounthi            ; pre-set the high byte of the loop counter (loop counter starts at 0F000H, counts to 10000)
+            
             call @AUDIBLE                    ; say "OK"
             jmp ANYSTART                     ; jump to the polling loop below
 ;----------- end of initialization code -----------
