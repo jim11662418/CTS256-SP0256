@@ -43,22 +43,19 @@ WORDCNTH    equ R56                          ; number of bytes in input buffer M
 WORDCNTL    equ R57                          ; number of bytes in input buffer LSB
 
 ; registers used by "usercode"...
-suppress    equ R112                         ; suppress leading zeros flag for decimal print function
-count       equ R113                         ; used by decimal print function
-statusreg   equ R114                         ; saved copy of status register
-errorcount  equ R115                         ; checksum error count for hex download function
-recordlen   equ R116                         ; record length for hex download function
-checksum    equ R117                         ; checksum for hex download function
 addresshi   equ R118                         ; high byte of address pointer
 addresslo   equ R119                         ; low byte of address pointer
-lengthhi    equ R120                         ; high byte of length for fill function
-lengthlo    equ R121                         ; low byte of length for fill function
-bytecounter equ R122                         ; counter used by hex input function
+count       equ R120                         ; used by decimal print function
+errorcount  equ R120                         ; number of checksum errors in hex download
+recordlen   equ R121                         ; record length for hex download function
+checksum    equ R122                         ; checksum for hex download function
+lengthhi    equ R121                         ; high byte of length for fill function
+lengthlo    equ R122                         ; low byte of length for fill function
 texthi      equ R123                         ; high byte of pointer to text to be printed
 textlo      equ R124                         ; high byte of pointer to text to be printed
 loopcounthi equ R125                         ; high byte of the loop counter for flashing LED
 loopcountlo equ R126                         ; low byte of the loop counter for flashing LED
-monitor     equ R127                         ; non-zero means run monitor (controlled by jumper connected to pin 7)
+flags       equ R127                         ; bit flags
 
 ; I/O ports...
 IOCNT0      equ P0                           ; I/O Control register 0
@@ -89,16 +86,17 @@ baudrate    equ 00H                          ; Timer 3 Reload Register value for
 
             include exceptions.inc           ; exception words and exception word routine
 
-;----------- this initiation code is run once upon reset -----------
+;---------- this initiation code is run once upon reset -------------
 EPROM:      movp IOCNT0,A                    ; read interrupt status bits
-            and %20H,A                       ; mask out everything except the INT3 flag
-            sta monitor                      ; save it as the 'run monitor' flag ('1' means run monitor)            
-            mov %0F0H,loopcounthi            ; pre-set the high byte of the loop counter (loop counter starts at 0F000H, counts to 10000)
-
+            and %00100000B,A                 ; mask out everything except the INT3 flag
+            sta flags                        ; save it as the 'run monitor' flag ('1' means jumper closed, run monitor)
+            mov %20H,loopcounthi             ; pre-set the high byte of the loop counter
             call @AUDIBLE                    ; say "OK"
             jmp ANYSTART                     ; jump to the polling loop below
-;----------- end of initialization code -----------
+;---------- end of initialization code ------------------------------
 
+; this code is from General Instrument Application Note AN-0505 Revision D dated 12/10/1986 page 26
+;---------- this loop is run when the CTS256 is waiting for input ---
 SPEAK:      btjo %01H,F2,ANYSTART
             and %0EFH,F2
 CRWAIT:     btjz %10H,F2,CRWAIT
@@ -124,31 +122,26 @@ MAINROUT:   cmp F2LO,R2LO                    ; output buffer empty?
             jeq ANYSTART
             orp %01H,IOCNT0                  ; enable INT1 (LRQ from SP0256)
             jmp ANYSTART
+;---------- end of loop ---------------------------------------------
 
 ;***********************************************************************
-; user code here is executed when CTS256 is idle
-; flash the green LED connected to B2 (pin 5) every 4096 times through
-; this loop (at about 2Hz) as a 'heartbeat' indicator
+; user code here is executed when the CTS256 is idle
+; flash the green LED connected to B2 (pin 5) at about 2Hz as a 'heartbeat' indicator
 ;***********************************************************************
-usercode:   add %01H,loopcountlo             ; increment the LSB of the loop counter
-            adc %00H,loopcounthi             ; increment the MSB of the loop counter
-            jnz usercode1                    ; jump if incrementing the high byte of the loop counter has not rolled over to zero
-            xorp %04H,BPORT                  ; the loop counter has rolled over to zero. toggle the green LED
-            mov %0F0H,loopcounthi            ; pre-set the high byte of the loop counter (loop counter starts at 0F000H, counts to 10000)
+usercode:   decd loopcountlo                 ; decrement the loop counter
+            jc usercode1                     ; jump if the count has not rolled over
+            xorp %00000100B,BPORT            ; else, the loop counter has rolled over from zero. toggle the green LED
+            mov %20H,loopcounthi             ; pre-set the high byte of the loop counter for next time
 
-usercode1:  lda monitor                      ; check the 'run monitor' flag
-            jnz usercode2                    ; non-zero means run the monitor
-            br @ANYSTART                     ; else, branch to the main control program
+usercode1:  btjo %00100000B,flags,usercode2  ; branch if the 'run monitor' flag is set
+            br @ANYSTART                     ; else, branch to the main control above
 
-usercode2:  push ST
-            pop statusreg                    ; save the status register for display later
-            andp %0FEH,IOCNT1                ; disable interrupt 4 (serial interrupt)
+usercode2:  andp %11111110B,IOCNT1           ; disable interrupt 4 (serial interrupt)
+            orp %00000001B,BPORT		         ; set BUSY (pin 3) high (BUSY=false)
             mov %hi(bannertxt),texthi
             mov %lo(bannertxt),textlo
             call @putstr                     ; display the sign-on banner
-            jmp usercode4
 
-usercode3:  call @return                     ; start on a new line
 usercode4:  mov %hi(menutxt),texthi          ; texthi and textlo point to the menu text
             mov %lo(menutxt),textlo
             call @putstr                     ; display the menu
@@ -163,59 +156,58 @@ usercode5:  call @return
             cmp %'D',A                       ; is it 'D'?
             jne usercode6
             call @display                    ; memory display function
-            jmp usercode5                    ; go back for another character
+            jmp usercode5                    ; go back for another character when finished
 
 usercode6:  cmp %'F',A                       ; is it 'F'?
             jne usercode7
             call @fill                       ; memory fill function
-            jmp usercode5                    ; go back for another character
+            jmp usercode5                    ; go back for another character when finished
 
 usercode7:  cmp %'R',A                       ; is it 'R'?
             jne usercode8
             call @registers                  ; registers display function
-            jmp usercode5                    ; go back for another character
+            jmp usercode5                    ; go back for another character when finished
 
 usercode8:  cmp %'P',A                       ; is it 'P'?
             jne usercode9
-            call @peripheral                 ; new line
-            jmp usercode5                    ; go back for another character
+            call @peripheral                 ; peripherial file display function
+            jmp usercode5                    ; go back for another character when finished
 
 usercode9:  cmp %'S',A                       ; is it 'S'?
             jne usercode10
             call @status                     ; status register display function
-            pop ST                           ; restore the status register
-            jmp usercode5                    ; go back for another character
+            jmp usercode5                    ; go back for another character when finished
 
 usercode10: cmp %'E',A                       ; is it 'E'?
             jne usercode11
             call @examine                    ; examine/modify memory function
-            jmp  usercode5                   ; go back for another character
+            jmp  usercode5                   ; go back for another character when finished
 
-usercode11: cmp %'C',A
+usercode11: cmp %'C',A                       ; is it 'C'?
             jne usercode12
             call @callsub                    ; call subroutine function
-            jmp usercode5
+            jmp usercode5                    ; go back for another character when finished
 
-usercode12: cmp %'H',A
+usercode12: cmp %'H',A                       ; is it 'H'?
             jne usercode13
             call @download                   ; hex download function
-            jmp usercode5
+            jmp usercode5                    ; go back for another character when finished
 
-usercode13: cmp %'J',A
+usercode13: cmp %'J',A                       ; is it 'J'?
             jne usercode14
             br @jump                         ; jump to address function
 
-usercode14: cmp %':',A
+usercode14: cmp %':',A                       ; is it ':'?
             jne usercode15
-            clr errorcount                   ; clear checksum error count
-            call @dnload3                    ; hex download function
-            br @usercode5
+            clr count                        ; clear checksum error count
+            call @dnload3                    ; ':' triggers hex download function
+            br @usercode5                    ; go back for another character when finished
 
-usercode15: cmp %18H,A                       ; is it control X? (exit monitor)
+usercode15: cmp %18H,A                       ; is it control X?
             jz usercode16                    ; if so, disable monitor and exit the usercode loop
-            br @usercode3                    ; else, back to the top of the usercode loop
+            br @usercode4                    ; else, back to the top of the usercode loop
 
-usercode16: clr monitor                      ; clear the monitor flag
+usercode16: and %11011111B,flags             ; clear the monitor flag
             mov %lo(exittxt),textlo
             mov %hi(exittxt),texthi
             call @putstr                     ; print "Exiting Monitor. Goodbye"
@@ -224,17 +216,17 @@ usercode16: clr monitor                      ; clear the monitor flag
             mov %hi(exittxt),texthi
             call @say                        ; speak "Exiting Monitor. Goodbye"
 
-            orp %01,IOCNT1                   ; enable interrupt 4 (serial interrupt)
+            orp %00000001B,IOCNT1            ; enable interrupt 4 (serial interrupt)
             br @ANYSTART                     ; jump to the main control program
 
 ;------------------------------------------------------------------------
 ; display the status register as eight binary digits
 ;------------------------------------------------------------------------
-status:     call @return
+status:     push ST                          ; save the status register
             mov %hi(flagstxt),texthi
             mov %lo(flagstxt),textlo
             call @putstr
-            mov statusreg,A                  ; retrieve the status register saved earlier
+            pop A                            ; retrieve the status register from the stack
             call @binary                     ; print the status register (now in A) as binary
             call @return
             rets
@@ -242,12 +234,12 @@ status:     call @return
 ;------------------------------------------------------------------------
 ; fill RAM with value
 ;------------------------------------------------------------------------
-fill:       call @return                     ; start on a new line
-            mov %hi(addresstxt),texthi
+fill:       mov %hi(addresstxt),texthi
             mov %lo(addresstxt),textlo
             call @putstr                     ; prompt for the staring address
             call @get4hex
             jnc fill3                        ; jump if a valid hex address
+            call @return
             rets                             ; else return if enter,escape, space or backspace
 
 fill3:      mov A,addresshi                  ; MSB of address
@@ -263,6 +255,7 @@ fill3:      mov A,addresshi                  ; MSB of address
 
 fill4:      mov A,lengthhi                   ; MSB of length
             mov B,lengthlo                   ; LSB of length
+            decd lengthlo                    ; decrement the number of bytes to fill
             call @space
             mov %09,A                        ; tab
             call @putchar
@@ -277,12 +270,9 @@ fill5:      push A                           ; save the fill byte in A
             call @return                     ; start on a new line
             pop A                            ; restore the fill byte
 fill6:      sta *addresslo                   ; store the fill byte at the address
-            dec lengthlo                     ; decrement least significant byte of length
-            jnz fill7                        ; jumo if the least significant byte of length has not rolled over from FFH to zero
-            dec lengthhi                     ; decrement the most significant byte of length
-            cmp %0FFH,lengthhi               ; has the most significant byte of length rolled over from zero?
-            jnz fill7                        ; no, increment the address
-            rets                             ; return when length is zero
+            decd lengthlo                    ; decrement the number of bytes to fill
+            jc fill7                         ; jump if lengthhi has not rolled over from 00 to FF
+            rets                             ; else, return when finished
 
 fill7:      add %01H,addresslo               ; next address
             adc %00H,addresshi
@@ -292,8 +282,7 @@ fill7:      add %01H,addresslo               ; next address
 ; display contents of one page of external RAM pointed to by registers
 ; addresshi and addresslo in both hex and ASCII
 ;------------------------------------------------------------------------
-display:    call @return                     ; start on a new line
-            mov %hi(addresstxt),texthi
+display:    mov %hi(addresstxt),texthi
             mov %lo(addresstxt),textlo
             call @putstr                     ; prompt for 4 digit address
             call @get4hex                    ; get 4 digit hex address
@@ -356,29 +345,31 @@ display6:   call @return
 ;------------------------------------------------------------------------
 ; call a subroutine, return to monitor
 ;------------------------------------------------------------------------
-callsub:    call @return                     ; start on a new line
-            mov %hi(addresstxt),texthi
+callsub:    mov %hi(addresstxt),texthi
             mov %lo(addresstxt),textlo
             call @putstr                     ; prompt for 4 digit address
             call @get4hex                    ; get 4 digit hex address
-            jc callsub1                      ; jump if not a valid 4 digit hex address
-            mov A,addresshi
+            jnc callsub1                     ; jump if a valid 4 digit hex address
+            call @return
+            rets
+            
+callsub1:   mov A,addresshi
             mov B,addresslo
             call @return
             call *addresslo
             call @return
-callsub1:   rets
+            rets
 
 ;------------------------------------------------------------------------
 ; jump to a memory address
 ;------------------------------------------------------------------------
-jump:       call @return                     ; start on a new line
-            mov %hi(addresstxt),texthi
+jump:       mov %hi(addresstxt),texthi
             mov %lo(addresstxt),textlo
             call @putstr                     ; prompt for 4 digit address
             call @get4hex                    ; get 4 digit hex address
             jnc jump1                        ; jump if a valid 4 digit hex address
-            rets
+            call @return            
+            br @usercode5                    ; else, go back for another character
 
 jump1:      mov A,addresshi
             mov B,addresslo
@@ -386,52 +377,66 @@ jump1:      mov A,addresshi
             br *addresslo                    ; jump to address in addresslo, addresshi
 
 ;------------------------------------------------------------------------
-; display contents of the Register file (00H-7FH) in both hex and ASCII
+; display contents of the Register File (00-127) in both hex and ASCII
 ;------------------------------------------------------------------------
-registers:  call @return                     ; start on a new line
+registers:  mov %hi(regcoltxt),texthi
+            mov %lo(regcoltxt),textlo
+            call @putstr                     ; print the column headings
             clr addresshi                    ; MSB of register file starting address
             clr addresslo                    ; LSB of register file starting address
-            call @return                     ; start on a new line
-            call @space
-            call @space
-            mov %hi(columnstxt),texthi
-            mov %lo(columnstxt),textlo
-            call @putstr                     ; print the column headings
 
-registers1: mov addresshi,A
-            call @hexbyte                    ; print the MSB of the register file address
+; print the decimal address of the first register in this row
+registers1: mov addresslo,A
+            cmp %00,addresslo
+            jne registers2
+            call @space
+            jmp registers3
+registers2: cmp %100,addresslo
+            jhs registers4
+registers3: call @space
+registers4: call @space
+            mov %'R',A
+            call putchar
             mov addresslo,A
-            call @hexbyte                    ; print the LSB of the register file address
+            call @decimal8
             call @space
-            push addresslo                   ; save the address LSB for the ASCII display later
 
-registers2: lda *addresslo                   ; retrieve the byte at the address
+; print in hex the contents of the next ten registers
+            push addresslo
+            mov %10,count
+registers5: lda *addresslo                   ; retrieve the byte at the address
             call @hexbyte                    ; print the hex value of the byte at the address
             call @space
             inc addresslo                    ; next address
-            mov addresslo,A
-            and %0FH,A
-            jnz registers2
-
+            cmp %128,addresslo
+            jnz registers6
+            mov %6,count
             call @space
-            pop addresslo
-registers3: lda *addresslo
+            djnz count,$-3
+            jmp registers7                  ; R127, skip the next and go to the ASCII displat
+
+registers6: djnz count,registers5
+
+; print in ASCII the contents of the next ten registers
+registers7: pop addresslo
+            mov %10, count
+            call @space
+registers8: lda *addresslo
             call @ascii
             inc addresslo
-            mov addresslo,A
-            and %0FH,A
-            jnz registers3
-
+            cmp %128,addresslo
+            jz registers9                    ; R127, exit
+            djnz count,registers8
             call @return
-            cmp %80H,addresslo
-            jne registers1
+            jmp registers1
+
+registers9: call @return
             rets
 
 ;------------------------------------------------------------------------
-; display contents of the Peripheral file (0100H-0117H) in hex
+; display contents of the Peripheral File (0100H-0117H) in hex
 ;------------------------------------------------------------------------
-peripheral: call @return                     ; start on a new line
-            mov %hi(portstxt),texthi
+peripheral: mov %hi(portstxt),texthi
             mov %lo(portstxt),textlo
             call @putstr                     ; print the column headings
             mov %01,addresshi                ; MSB of starting peripheral file address
@@ -468,8 +473,7 @@ oneline4:   call @space                      ; print spaces for the "reserved" p
 ;------------------------------------------------------------------------
 ; examine/modify RAM contents
 ;------------------------------------------------------------------------
-examine:    call @return
-            mov %hi(addresstxt),texthi
+examine:    mov %hi(addresstxt),texthi
             mov %lo(addresstxt),textlo
             call @putstr                     ; prompt for 4 digit RAM address
             call @get4hex                    ; get four digit hex address
@@ -499,9 +503,8 @@ examine2:   call @return
             lda *addresslo
             call @hexbyte
 examine3:   sta *addresslo                   ; store the new value at the address
-examine4:   inc addresslo
-            jnc examine2
-            inc addresshi
+examine4:   add %01,addresslo
+            adc %00,addresshi
             jmp examine2
 
 ;------------------------------------------------------------------------
@@ -514,13 +517,14 @@ examine4:   inc addresslo
 ;   5. Data, a sequence of n bytes of data, represented by 2n hex digits.
 ;   6. Checksum, two hex digits, a computed value (starting with the byte count) used to verify record data.
 ;------------------------------------------------------------------------
-; R115 holds the number of data bytes per line, R116 holds the computed checksum for the line,
-; R114 holds the checksum error count.
+; 'recordlen' holds the number of data bytes per record,
+; 'checksum' holds the computed checksum for the record,
+; 'errorcount' holds the total checksum error count.
+;
 ; Note: when using Teraterm to "send" a hex file, make sure that Teraterm
 ; is configured for a transmit delay of 1 msec/char and 10 msec/line.
 ;------------------------------------------------------------------------
-download:   call @return
-            mov %hi(dnloadtxt),texthi
+download:   mov %hi(dnloadtxt),texthi
             mov %lo(dnloadtxt),textlo
             call @putstr
             clr errorcount                   ; initialize the checksum error count to zero
@@ -531,13 +535,13 @@ dnload1:    call @getchar                    ; get a character from the serial p
             jne dnload1
             rets                             ; escape exits back to the main loop
 
-; start of record found...
+; start of record character ':' found...
 dnload3:    call @putchar                    ; echo the start of record ':'
             call @get2hex                    ; get the record length
-            mov A,recordlen                  ; initialize the record length
-            mov A,checksum                   ; initialize the checksum
             cmp %0,A                         ; is the record length zero? (last record)
             jeq dnload7                      ; yes, go download the remainder of the last record
+            mov A,recordlen                  ; else, initialize the record length
+            mov A,checksum                   ; and initialize the checksum
 
             call @get2hex                    ; get the address hi byte
             mov A,addresshi
@@ -556,13 +560,11 @@ dnload3:    call @putchar                    ; echo the start of record ':'
 ; download and store data bytes...
 dnload4:    call @get2hex                    ; get a data byte
             sta *addresslo                   ; store the data byte at the address
-            inc addresslo                    ; next address
-            jnc dnload5
-            inc addresshi
-dnload5:    add checksum,A                   ; add the computed checksum to the data byte
+            add %01,addresslo                    ; next address
+            adc %00,addresshi
+            add checksum,A                   ; add the computed checksum to the data byte
             mov A,checksum                   ; save the sum in A as the new checksum
-            dec recordlen                    ; decrement the record length count
-            jnz dnload4                      ; if not zero, go back for another record data byte
+            djnz recordlen,dnload4           ; decrement the record length if not zero, go back for another record data byte
 
 ; since the record's checksum byte is the two's complement and therefore the additive inverse
 ; of the data checksum, the verification process can be reduced to summing all decoded byte
@@ -571,32 +573,62 @@ dnload5:    add checksum,A                   ; add the computed checksum to the 
             add checksum,A                   ; add the computed checksum to the record's checksum in A
             jz dnload6                       ; zero means the checksum is correct
             inc errorcount                   ; else increment checksum error count
+            mov %'-',A
+            call @putchar
+            mov %'E',A                       ; 'E' indicates a checksum error for this recoed
+            call @putchar
 dnload6:    call @getchar                    ; get the carriage return at the end of the line
             call @putchar                    ; echo the carriage return at the end of the line
             jmp dnload1                      ; go back for the next record
 
 ; last record
 dnload7:    call @get2hex                    ; get the last address hi byte
+            mov A,addresshi                  ; save it in addresshi
             call @get2hex                    ; get the last address lo byte
+            mov A,addresslo                  ; save it in addresslo
             call @get2hex                    ; get the last record type
             call @get2hex                    ; get the last checksum
             call @getchar                    ; get the last carriage return
             call @putchar                    ; echo the carriage return
+            call @putchar
             mov errorcount,A                 ; get the error count into A
-            jnz dnload8                      ; jump if there are checksum errors
+            jnz dnload9                      ; jump if there are checksum errors
             mov %hi(noerrstxt),texthi
             mov %lo(noerrstxt),textlo
-            call @putstr
-            jmp dnload9
+            call @putstr                     ; print "No checksum errors"
+            mov addresshi,A
+            or addresslo,A
+            jz dnload8                       ; jump if the address in the last record is zero
+            call *addresslo                  ; else, call the function at the address in the last record
+dnload8:    rets                             ; return to monitor  
 
-dnload8:    call @prndec8                    ; print the error count
-dnload9:    mov %hi(errorstxt),texthi
+; checksum errors
+dnload9:    call @decimal8                   ; print the checksum error count
+            mov %hi(errorstxt),texthi
             mov %lo(errorstxt),textlo
             call @putstr
             rets
+
+            db 5B00H-$ dup (0FFH)            ; fill the empty space with 'FF'
+
+            org 5B00H
             
-            org 5700H
-            
+            ; functions in the exception EPROM...
+            br @ascii                        ; print the contents of A as an ASCII character
+            br @binary                       ; print the contents of A as eight binary digits
+            br @decimal8                     ; print the unsigned 8 bit binary number in A as three decimal digits
+            br @get1hex                      ; get one hex digit 0-F from the serial port in A.
+            br @get2hex                      ; get two hex digits 00-FF from the serial port in A.
+            br @get4hex                      ; get four hex digits 0000-FFFF from the serial port in registers A (MSB) and B (LSB).
+            br @getchar                      ; wait for a character from the serial port, return it in A
+            br @hexbyte                      ; print the contents of A as a 2 digit hex number
+            br @putchar                      ; transmit the character in A through the serial port.
+            br @putstr                       ; transmit a null terminated string pointed to by registers texthi (MSB) and textlo (LSB)
+            br @return                       ; print (to the serial port) CR (0DH)
+            br @say                          ; speak a null terminated string pointed to by registers texthi (MSB) and textlo (LSB)
+            br @space                        ; print (to the serial port) space (20H)
+            br @toupper                      ; convert the ASCII code in A to uppercase
+
 ;------------------------------------------------------------------------
 ; speak the null terminated string pointed to by registers texthi (MSB) and textlo (LSB)
 ;------------------------------------------------------------------------
@@ -618,27 +650,26 @@ say2:       pop A
 ; prints (to the serial port) the unsigned 8 bit binary number in A as
 ; three decimal digits. leading zeros are suppressed.
 ;------------------------------------------------------------------------
-prndec8:    push A                           ; save the number
-            clr suppress                     ; suppress zero flag (0 means suppress leading zeros)
+decimal8:   push A                           ; save the number
+            and %01111111B,flags             ; clear suppress zero flag
             mov %100,B                       ; power of 10, starts as 100
-prndec8a:   mov %'0'-1,count                 ; counter (starts at 1 less than ASCII zero)
-prndec8b:   inc count
+decimal8a:  mov %'0'-1,count                 ; counter (starts at 1 less than ASCII zero)
+decimal8b:  inc count
             sub B,A                          ; subtract power of 10
-            jc prndec8b                      ; go back for another subtraction if the difference is still positive
+            jc decimal8b                     ; go back for another subtraction if the difference is still positive
             add B,A                          ; else , add back the power of 10
             push A
             mov count,A
             cmp %'0',A
-            jne prndec8c
-            cmp %0,suppress
-            jeq prndec8d
-prndec8c:   call @putchar                    ; print the (hindreds or tens) digit
-            mov %0FFH,suppress               ; now that we've printed a digit, set the flag
-prndec8d:   pop A
+            jne decimal8c
+            btjz %80H,flags,decimal8d
+decimal8c:  call @putchar                    ; print the (hundreds or tens) digit
+            or %10000000B,flags              ; now that we've printed a digit, set the flag
+decimal8d:  pop A
             sub %90,B                        ; reduce power of ten from 100 to 10
-            jc prndec8a                      ; jump if the tens digit is not yet done
+            jc decimal8a                     ; jump if the tens digit is not yet done
             add %30H,A                       ; else, convert the ones digit to ASCII
-            call @putchar                    ; print the ones digit
+            call @putchar                    ; print the units digit
             pop A
             rets
 
@@ -718,36 +749,25 @@ hex2asc2:   add %30H,A                       ; convert to ASCII number
             rets
 
 ;------------------------------------------------------------------------
-; sets carry flag if there is a character available in RXBUF
-;------------------------------------------------------------------------
-charavail:  clrc
-            btjzp %02H,SSTAT,charavail1
-            setc
-charavail1: rets
-
-;------------------------------------------------------------------------
 ; wait for a character from the serial port, return it in A
-; flash the green LED anout 2Hz
+; while waiting, flash the green LED at about 2Hz
 ;------------------------------------------------------------------------
 getchar:    btjzp %02H,SSTAT,getchar1        ; jump if RXBUF is empty
             movp RXBUF,A                     ; else, retrieve the character from RXBUF
             rets
 
-getchar1:   add %01H,loopcountlo             ; increment the low byte of the loop counter
-            adc %00H,loopcounthi             ; increment the high byte of the loop counter
-            jnz getchar                      ; go back if incrementing the high byte of the loop counter has not rolled over to zero
-
-            ; both the high and low bytes of the loop counter have rolled over to zero
-            mov %0B0H,loopcounthi            ; pre-set the high byte of the loop counter (loop counter starts at 0E000H, counts to 10000)
-            xorp %04H,BPORT                  ; toggle the green LED connected to PB2 (pin 5)
-            jmp getchar                      ; go back and check if a character is available at the serial port
+getchar1:   decd loopcountlo                 ; decrement the loop counter
+            jc getchar                       ; jump if the count has not rolled over
+            xorp %00000100B,BPORT            ; else, the loop counter has rolled over to zero. toggle the green LED
+            mov %50H,loopcounthi             ; pre-set the high byte of the loop counter for next time
+            jmp getchar                      ; go back and check if a character is available at the serial port            
 
 ;------------------------------------------------------------------------
 ; transmit the character in A through the serial port.
 ;------------------------------------------------------------------------
-putchar:    btjzp %01H,SSTAT,$               ; wait here until TXBUF is ready for a character
+putchar:    btjzp %00000001B,SSTAT,$         ; wait here until TXBUF is ready for a character
             movp A,TXBUF                     ; transmit it
-            btjzp %04H,SSTAT,$               ; wait here until the transmitter is empty
+            btjzp %00000100B,SSTAT,$         ; wait here until the transmitter is empty
             rets
 
 ;------------------------------------------------------------------------
@@ -781,7 +801,7 @@ get1hex2:   setc                             ; return with carry set for escape,
             rets
 
 ;------------------------------------------------------------------------
-; returns with two hex digits 00-FF from the serial port in A.
+; get two hex digits 00-FF from the serial port into A.
 ; returns with carry set for escape, space and enter
 ;------------------------------------------------------------------------
 ;-----------first digit
@@ -814,7 +834,7 @@ get2hex6:   setc                             ; return with carry set if escape
             rets
 
 ;------------------------------------------------------------------------
-; returns with four hex digits 0000-FFFF from the serial port in registers A (MSB) and B (LSB).
+; get four hex digits 0000-FFFF from the serial port into registers A (MSB) and B (LSB).
 ; returns with carry set for escape, space and enter
 ;------------------------------------------------------------------------
 ;-----------first digit
@@ -882,14 +902,14 @@ get4hex11:  cmp %0DH,A                       ; enter?
             jne get4hex15
             pop B                            ; third digit in B
             pop A                            ; most significant byte in A
-            mov %4,bytecounter
+            mov %4,count
 
 get4hex12:  clrc
             rrc A
             rrc B
             jnc get4hex13
             or %00001000B,B
-get4hex13:  djnz bytecounter,get4hex12
+get4hex13:  djnz count,get4hex12
             clrc
             rets
 
@@ -912,7 +932,7 @@ get4hex18:  setc                             ; return with carry set if escape
             rets
 
 ;------------------------------------------------------------------------
-; converts the ASCII code in A to uppercase, if it is lowercase
+; convert the ASCII code in A to uppercase, if it is lowercase
 ;------------------------------------------------------------------------
 toupper:    cmp %'a',A                       ; 'a' or 61H
             jl toupper1                      ; jump if the character in A is less than 61H
@@ -927,17 +947,17 @@ toupper1:   rets
 putstr:     lda *textlo                      ; retrieve the character at the address
             jeq putstr1                      ; zero means end of string
             call @putchar                    ; else, print it
-            add %01H,textlo                  ; increment pointer to next character
-            adc %00H,texthi
+            add %01,textlo                   ; increment pointer to next character
+            adc %00,texthi
             jmp putstr
 putstr1:    rets
 
 
 bannertxt:  db 0DH,0AH,0AH
-            db "CTS256A-AL2 Monitor Version 2.0",0DH
+            db "CTS256A-AL2 Monitor Version 2.1",0DH
             db "Copyright 2021 by Jim Loos",0DH
             db "Assembled ",DATE," at ",TIME,0DH,0
-menutxt:    db 0DH
+menutxt:    db 0DH,0AH
             db "C - Call subroutine",0DH
             db "D - Display memory",0DH
             db "E - Examine/modify RAM",0DH
@@ -948,18 +968,21 @@ menutxt:    db 0DH
             db "R - display Register file",0DH
             db "S - display Status register",0DH,0AH,0AH
             db "Control X exits monitor to Text-to-Speech function.",0DH,0AH,0
-flagstxt:   db "CNZI----",0DH,0
+flagstxt:   db 0DH,"CNZI----",0DH,0
 pressspctxt:db "Press Space key for next page...",0
 arrowtxt:   db " --> ",0
 newvaluetxt:db " New value: ",0
-addresstxt: db "Address: ",0
+addresstxt: db 0DH,"Address: ",0
 lengthtxt:  db "Length: ",0
 valuetxt:   db "Value: ",0
 columnstxt: db "   00 01 02 03 04 05 06 07 08 09 0A 0B 0C 0D 0E 0F",0DH,0
-portstxt:   db "     00 01 02 03 04 05 06 07",0DH,0
-dnloadtxt:  db "Waiting for HEX download...",0DH,0
-noerrstxt:  db "No",0
+regcoltxt:  db 0DH,"      00 01 02 03 04 05 06 07 08 09",0DH,0
+portstxt:   db 0DH,"     00 01 02 03 04 05 06 07",0DH,0
+dnloadtxt:  db 0DH,"Waiting for HEX download...",0DH,0
+noerrstxt:  db "No checksum errors",0DH,0
 errorstxt:  db " checksum errors.",0DH,0
 exittxt:    db "Exiting monitor. Goodbye.",0DH,0
+
+            db 6000H-$ dup (0FFH)            ; fill the empty space with 'FF'
 
             end
