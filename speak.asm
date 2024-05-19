@@ -28,19 +28,21 @@ bufflen     equ R104                         ; number of characters entered into
 ; I/O ports...
 IOCNT0      equ P0                           ; I/O Control register 0
 
-; functions in exception EPROM...
-prndec8     equ 5717H                        ; prints the unsigned 8 bit binary number in A as three decimal digits.
-return      equ 5743H                        ; prints (to the serial port) CR (0DH)
-space       equ 574BH                        ; prints (to the serial port) space (20H)
-hexbyte     equ 5763H                        ; prints the contents of A as a 2 digit hex number
-binary      equ 5775H                        ; prints the contents of A as eight binary digits
-charavail   equ 5799H                        ; sets carry flag if there is a character available in RXBUF
-getchar     equ 57A0H                        ; wait for a character from the serial port, return it in A
-putchar     equ 57B7H                        ; transmit the character in A through the serial port.
-get2hex     equ 57F0H                        ; returns with two hex digits 00-FF from the serial port in A.
-get4hex     equ 5819H                        ; returns with four hex digits 0000-FFFF from the serial port in registers A (MSB) and B (LSB).
-toupper     equ 589BH                        ; converts the ASCII code in A to uppercase
-putstr      equ 58A6H                        ; transmit a null terminated string pointed to by registers texthi (MSB) and textlo (LSB)
+; addresses of functions in the exception EPROM...
+ascii       equ 5B00H                        ; print the contents of A as an ASCII character
+binary      equ 5B03H                        ; print the contents of A as eight binary digits
+decimal8    equ 5B06H                        ; print the unsigned 8 bit binary number in A as three decimal digits
+get1hex     equ 5B09H                        ; get one hex digit 0-F from the serial port in A.
+get2hex     equ 5B0CH                        ; get two hex digits 00-FF from the serial port in A.
+get4hex     equ 5B0FH                        ; get four hex digits 0000-FFFF from the serial port in registers A (MSB) and B (LSB).
+getchar     equ 5B12H                        ; wait for a character from the serial port, return it in A
+hexbyte     equ 5B15H                        ; print the contents of A as a 2 digit hex number
+putchar     equ 5B18H                        ; transmit the character in A through the serial port.
+putstr      equ 5B1BH                        ; transmit a null terminated string pointed to by registers texthi (MSB) and textlo (LSB)
+return      equ 5B1EH                        ; print (to the serial port) CR (0DH)
+say         equ 5B21H                        ; speak a null terminated string pointed to by registers texthi (MSB) and textlo (LSB)
+space       equ 5B24H                        ; print (to the serial port) space (20H)
+toupper     equ 5B27H                        ; convert the ASCII code in A to uppercase
 
             org 4200H                        ; RAM
 
@@ -50,65 +52,89 @@ putstr      equ 58A6H                        ; transmit a null terminated string
             
             mov %hi(text),texthi
             mov %lo(text),textlo
-            call @putstr                     ; print instructions
+            call @putstr                     ; print the instructions
             
-loop1:      mov %'>',A
+input1:     mov %'>',A
             call @putchar                    ; prompt for input
-loop2:      clr B                            ; first character
-loop3:      call @getchar
+input2:     clr B                            ; first character
+input3:     call @getchar                    ; wait for a character
 
             cmp %18H,A                       ; is this character control X?
-            jne loop4
-            br @exit                         ; return to monitor
+            jne input4
+            pop B                            ; yes, restore registers
+            pop A
+            pop ST
+            rets                             ; return to the monitor
             
-loop4:      cmp %1BH,A                       ; is this character 'escape'?
-            jne loop5
+input4:     cmp %1BH,A                       ; is this character 'escape'?
+            jne input5
             call @return
-            jmp loop1                        ; abandon the input and restart
+            jmp input1                       ; if so, abandon the input and restart
             
-loop5:      cmp %0DH,A                       ; is this character 'enter'?
-            jne loop6
-            br @speak                        ; speak the allophones if 'enter'
+input5:     cmp %08H,A                       ; is this character backspace?
+            jne input6
+            cmp %00,B                        ; is this the first character of the allophone?
+            jeq input3                       ; if so, go back. backspace is not allowed as the first character
+            call @putchar                    ; else, print the backspace
+            call @space                      ; print a 'space' to overwrite the character that was on the screem
+            mov %08H,A
+            call @putchar                    ; another backspace
+            dec B                            ; forget the character in the buffer
+            jmp input3                       ; go back for a replacement character
+            
+input6:     cmp %0DH,A                       ; is this character 'enter'?
+            jne input8
+            cmp %0,B                         ; is this the first character of the allophone?                          
+            jeq input7                       ; if so, go speak the allophones
+            cmp %1,B                         ; is this the second character of the allophone?
+            jeq input3                       ; yes, go back for another character. 'enter' is not allowed as the second character
+            mov B,bufflen                    ; else, save the number of characters entered by the user  
+            call @search                     ; search for the allophone in the table
+            call @store                      ; save the allophone address in the output buffer            
+input7:     br @speak                        ; go speak the allophones                      
 
-loop6:      cmp %20H,A                       ; is this character 'space'?
-            jne loop7
-            cmp %2,B                         ; is this the third character?
-            jeq loop10                       ; jump the third character is 'space'
-            jmp loop3                        ; else, go back for another character. 'space' is not allowed for 1st or 2nd characters
+input8:     cmp %20H,A                       ; is this character 'space'?
+            jne input9
+            cmp %2,B                         ; is this the third character of the allophone?
+            jeq input12                      ; yes, go lookup the allophone and store it
+            jmp input3                       ; else, go back for another character. 'space' is not allowed for 1st or 2nd characters
             
-; this character is neither 'escape', 'enter' nor 'space'            
-loop7:      call @toupper                    ; convert the character to uppercase
+; this character is neither 'backspace', 'escape', 'enter' nor 'space'            
+input9:     call @toupper                    ; convert the character to uppercase
             cmp %'[',A
-            jhs loop3                        ; go back if this character is above 'Z'
+            jhs input3                       ; go back if this character is above 'Z'
             cmp %2,B
-            jeq loop8                        ; jump if this is the third character
+            jeq input10                      ; jump if this is the third character
 ; this is the first or second character...            
             cmp %'A',A
-            jl loop3                         ; jump if this character is below 'A'            
-            jmp loop9                        ; go print it and store it in the buffer
+            jl input3                        ; jump if this character is below 'A'            
+            jmp input11                      ; go print it and store it in the buffer
 
 ; this is the third character...            
-loop8:      cmp %'1',A
-            jl loop3                         ; jump if the third character below is '0' or below
+input10:    cmp %'1',A
+            jl input3                        ; jump if the third character below is '0' or below
             cmp %'6',A
-            jhs loop3                        ; jump if the third character is '6' or above
+            jhs input3                       ; jump if the third character is '6' or above
             call @putchar                    ; else, the third character is 1-5. print it
             sta @buffer(B)                   ; and save it in the buffer
             inc B                            ; increment the pointer
-            jmp loop10                       ; go print a space after the third character
+            jmp input12                      ; go print a space after the third character
             
-loop9:      call @putchar                    ; print the character
+input11:    call @putchar                    ; print the character
             sta @buffer(B)                   ; save it in the buffer
-            inc B                            ; increment the pointer
-            jmp loop3                        ; go back for the next character
+            inc B                            ; increment the buffer pointer
+            jmp input3                       ; go back for the next character
             
-; the third character has been entered, or the second character followed by 'space'            
-loop10:     call @space                      ; print ' '
-            mov B,bufflen                    ; save the number of characters entered by the user  
+; the third character of the allophone has been entered, or the second character of the allophone followed by 'space'            
+input12:    call @space                      ; print ' '
+            mov B,bufflen                    ; save the number of characters in the buffer
+            call @search                     ; search for the allophone in the table
+            call @store                      ; save the allophone address in the output buffer
+            br @input2                       ; go back for the first character of the next next allophone
             
-; search for the allophone string entered by the user ('buffer') in a table of allophones ('allophones')
-; if found, 'index' points to the first character of the allophone found in the table.
-; if not found, 'index' is zero and the allophone address for PA1 (00H) will be used.
+; search for the allophone string entered by the user in 'buffer' in a table of allophones ('allophones')
+; if found, 'index' points to the first character of the allophone found in the table. if not found, 'index' is zero.
+; 'index' is then decremented and divided by 3 to convert into the allophone address in A.
 ; adapted from code on page 9-52 of the 'TMS7000 Family Data Manual'.
 search:     mov %tablelength+1,index         ; length of the table of allophones in bytes
 search1:    mov bufflen,B                    ; reset string pointer
@@ -128,42 +154,35 @@ match:      clr divisorMSB                   ; zero the MSB of the dividend
             mov %3,B                         ; 3 as divisor (divide by 3)
             call @divide                     ; divide string index by 3 to get the allophone address
             mov divisorLSB,A                 ; divisorLSB now contains the allophone address
+            rets                             ; return with the allophone address in A
+
+; the allophone string was not found in the table
+notfound:   clr A                            ; a match is not found...
+            rets                             ; return with zero in A
             
+; store the allophone address in the output buffer pointed to by R8, R9            
 store:      decd R54                         ; decrement buffer space available count    
             sta *R9                          ; save the allophone address in the output buffer
             add %01H,R9                      ; increment the LSB of the output write pointer
             adc %00H,R8                      ; increment the MSB of the output write pointer
-            br @loop2                        ; go back for the next string input
-
-; the allophone string was not found in the table. use allophone address '00' (PA1)      
-notfound:   clr A                            ; if a match is not found, store PA1 in the buffer
-            jmp store
+            rets
             
 ; 'enter' has been pressed. store the allophone address for 'PA1' in the output buffer to end the word.
 ; enable Interrupt 1 to allow the SP0256 to speak the allophones in the output buffer.
 speak:      clr A                            ; store PA1 in the buffer at the end of the word
-            decd R54                         ; decrement buffer space available count    
-            sta *R9                          ; save the allophone address in the output buffer
-            add %01H,R9                      ; increment the LSB of the output write pointer
-            adc %00H,R8                      ; increment the MSB of the output write pointer
-            orp %01H,IOCNT0		            ; enable INT1 to allow the SP0256 to pronounce the allophones
+            call @store
+            orp %00000001B,IOCNT0            ; enable INT1 to allow the SP0256 to pronounce the allophones
             call @return                     ; new line
-            br @loop1                        ; go back for a new string of allophones
-
-; return to the monitor            
-exit:       pop B                            ; restore registers
-            pop A
-            pop ST
-            rets
+            br @input1                        ; go back for a new string of allophones
 
 ; divide a 16 bit dividend in divisorMSB, divisorLSB by an 8 bit divisor in B. returns a 16 bit
 ; quotient in divisorMSB, divisorLSB and an 8 bit remainder in A. All numbers are unsigned positive numbers.
 ; adapted from code on page 9-56 of the 'TMS7000 Family Data Manual'.   
-divide:     mov %16,counter                  ; set loop counter to 16 (8+8)
+divide:     mov %16,counter                  ; set input counter to 16 (8+8)
             clr A                            ; initialize result register
 divide1:    rlc divisorLSB                   ; multiply dividend by 2
             rlc divisorMSB
-            rlc A
+            rlc A                            ; multiply the remainder by 2
             jnc divide2
             sub B,A
             setc
@@ -250,4 +269,4 @@ text:       db "\rEnter allophones separated by spaces.\r"
             db "Press <ENTER> to speak. <ESC> cancels all input.\r"
             db "Control X to return to monitor.\r\r",0
             
-            end
+            end 4200H
